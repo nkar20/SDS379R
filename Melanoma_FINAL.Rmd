@@ -1,0 +1,1156 @@
+---
+title: "Network Analysis of Single-Cell RNA-Seq Reveals Suv39h1-Mediated Epigenetic Regulation of CD8+ T Cell Exhaustion in a Murine Melanoma Model"
+output: html_document
+---
+
+# Information About Data
+
+* Paper: [CD8+T cell responsiveness to anti-PD-1 is epigenetically regulated by Suv39h1 in melanomas](https://doi.org/10.1038/s41467-022-31504-z)
+  + Data: Seurat object with single cell RNA-seq gene expression data. Suv39h1-KO and littermate wildtype C57BL/6J male mice injected subcutaneously (s.c. or under the skin) with B16-OVA tumor cells were either treated or not treated with anti-PD-1. Tumors were harvested on Day 20 and processed.
+  + Results: Suv39h1-deficient CD8+ tumor-infiltrating lymphocytes (TIL) show phenotypic characteristics of exhausted cells, but they also express strong IFN-I signature and respond strongly to PD-1 blockade. This response induces tumor rejection via greater chromatin accessibility for genes linked to effector functions.
+
+Genotype: WT = wildtype, KO = Suv39h1 knockout
+Treatment: T = anti-PD-1 treatment, NT = no treatment
+n = number of samples (i.e., mice)
+* In Seurat object sample ID, presence of T in indicates treatment
+
+        .--------------------------------.
+        |  Genotype  |  Treatment  |  n  |
+        |--------------------------|-----|
+        |     WT     |      NT     |  3  |
+        |     WT     |       T     |  2  |
+        |     KO     |      NT     |  2  |
+        |     KO     |       T     |  2  |
+        .--------------------------------.
+
+
+# SEURAT OBJECT PROCCESSING
+
+## Import Libraries
+* Seurat (v5.1.0): Access single-cell RNA-seq data via a compact object
+* DESeq2 (v1.46.0): Organize gene expression data and normalize/transform the data
+* ggplot2 (v3.5.1): Create and save plots
+* dplyr (v1.1.4): Create, modify, and/or delete columns or rows of data frame
+* tidyverse (v2.0.0): Modify organization of data from data frame
+* tibble (v3.2.1): Create simple data frames
+```{r}
+# Install BiocManager and required libraries as necessary
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("DESeq2")
+
+# Load libraries
+suppressMessages(library(Seurat))
+suppressMessages(library(DESeq2))
+suppressMessages(library(ggplot2))
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyverse))
+suppressMessages(library(tibble))
+setwd("~/SDS 379R")
+```
+
+## Load Data
+```{r}
+seurat_object <- readRDS("GSE198422_Niborski_2022_Seurat_v3.Rds")
+```
+
+## Cell Counts in Data
+```{r}
+# 21,646 cells total, which is the same as in the paper
+ncol(seurat_object)
+
+# Get total number of cells per cell state
+table(seurat_object@active.ident)
+
+# Number of cells given the sample and cell state
+table(seurat_object$orig.ident, seurat_object@active.ident)
+```
+
+## View Clusters from Paper
+```{r}
+# Cell state labels to cluster labels
+cluster_labels <- c(
+  "Memory" = "C1",
+  "Memory activated" = "C2",
+  "Early Activated effectors" = "C3",
+  "IFN" = "C4",
+  "Effectors cytolytic" = "C5",
+  "Progenitors exhausted" = "C6",
+  "Late Exhausted" = "C7",
+  "Cycling" = "C8"
+)
+
+# Cluster labels to cell state labels
+cell_state_labels <- c(
+  "C1" = "Memory 1",
+  "C2" = "Memory 2",
+  "C3" = "Early Activated",
+  "C4" = "IFN-a Response",
+  "C5" = "Effector Cytolytic",
+  "C6" = "Progenitors Exhausted",
+  "C7" = "Late Exhausted",
+  "C8" = "Cycling Cells"
+)
+
+# Rename cell state labels
+seurat_object <- RenameIdents(seurat_object, cluster_labels)
+
+# Cluster labels to legend labels
+custom_labels <- c(
+  "C1" = "C1 - Memory 1: Lef1/Il7r",
+  "C2" = "C2 - Memory 2: Ikzf2",
+  "C3" = "C3 - Early Activated",
+  "C4" = "C4 - IFN-a Response",
+  "C5" = "C5 - Effector Cytolytic: Cx3cr1/Gzma",
+  "C6" = "C6 - Progenitors Exhausted: Cd200/Slamf6",
+  "C7" = "C7 - Late Exhausted",
+  "C8" = "C8 - Cycling Cells"
+)
+
+# Cluster labels to cluster colors
+custom_colors <- c(
+  "C1" = "#DF7D72",
+  "C2" = "#BF9834",
+  "C3" = "#89AC36",
+  "C4" = "#64BB70",
+  "C5" = "#68BCC3",
+  "C6" = "#61A8F8",
+  "C7" = "#BB82F8",
+  "C8" = "#E36DC7"
+)
+
+# Save the UMAP plot as a PNG
+umap_plot <- DimPlot(seurat_object, reduction = "umap", 
+                     label = TRUE, repel = TRUE, pt.size = 1.5) +
+  theme_classic(base_size = 16) +
+  scale_color_manual(values = custom_colors,
+                     breaks = names(custom_labels),
+                     labels = custom_labels) +
+  labs(x = "UMAP Dimension 1", y = "UMAP Dimension 2")
+ggsave("umap.png", plot = umap_plot, width = 15, height = 10, dpi = 300)
+
+# Rename cell states
+seurat_object <- RenameIdents(seurat_object, cell_state_labels)
+
+# Plot UMAP
+umap_plot
+```
+
+## Pseudobulk Aggregation Based on Sample and Cell State
+```{r}
+# Set cell state labels to new section
+seurat_object$cell_state <- Idents(seurat_object)
+# table(seurat_object$orig.ident)
+# table(seurat_object$cell_state)
+
+# Create pseudobulk matrix
+pseudobulk_matrix <- AggregateExpression(
+  object = seurat_object,
+  group.by = c("orig.ident", "cell_state"),
+  assays = "RNA",
+  slot = "counts"
+)
+
+# Create pseudobulk data frame
+df_pseudobulk <- as.data.frame(pseudobulk_matrix$RNA)
+
+# Count number of genes in df_pseudobulk
+nrow(df_pseudobulk)
+```
+
+## Retrieve Metadata
+```{r}
+# Create separate columns specifying cell state, genotype, and treatment
+df_metadata <- data.frame(Sample.Cell_State = colnames(df_pseudobulk)) %>%
+  mutate(Cell_State = sub(".*_", "", colnames(df_pseudobulk)),
+         Genotype = ifelse(grepl("^KO", Sample.Cell_State), "KO", "WT"),
+         Treatment = ifelse(grepl("-T-", Sample.Cell_State), "T", "NT"),
+         Replicate = as.numeric(str_extract(Sample.Cell_State, "(?<=-)[0-9]+")))
+
+# Set factors for certain columns
+df_metadata$Genotype <- factor(df_metadata$Genotype, levels = c("WT", "KO"))
+df_metadata$Treatment <- factor(df_metadata$Treatment, levels = c("NT", "T"))
+df_metadata$Cell_State <- factor(df_metadata$Cell_State,
+                                 levels = c("Memory 1", "Memory 2", "Early Activated", 
+                                            "IFN-a Response", "Effector Cytolytic", 
+                                            "Progenitors Exhausted", "Late Exhausted", 
+                                            "Cycling Cells"))
+
+# Relevel for reference points
+df_metadata$Genotype <- relevel(df_metadata$Genotype, ref = "WT")
+df_metadata$Treatment <- relevel(df_metadata$Treatment, ref = "NT")
+df_metadata$Cell_State <- relevel(df_metadata$Cell_State, ref = "Memory 1")
+
+# Create a combined group column
+df_metadata$Combined_Group <- paste(df_metadata$Genotype, 
+                                     df_metadata$Treatment, 
+                                     df_metadata$Cell_State, 
+                                     sep = "_")
+```
+
+## Normalize and Transform Gene Expression Counts
+* estimateSizeFactors() is used to account varying sequencing depth across samples (i.e., different number of cells per sample per cell state)
+* vst() is used to transform gene expression counts by the design parameters set (i.e., Cell_State, Treatment, and Genotype)
+```{r}
+# Keep gene expression counts >= 5 in >= 50 sample columns
+keep_genes <- rowSums(df_pseudobulk >= 5) >= 50
+df_pseudobulk_filtered <- df_pseudobulk[keep_genes, ]
+
+# Create DESeq data set
+dds <- DESeqDataSetFromMatrix(countData = df_pseudobulk_filtered,
+                              colData = df_metadata,
+                              design = ~ Cell_State + Treatment + Genotype + Treatment:Genotype)
+dds_est <- estimateSizeFactors(dds)
+
+# Perform VST, consider experimental groups
+df_vst <- assay(vst(dds_est, blind = FALSE))
+
+# Get number of genes in df_vst
+nrow(df_vst)
+```
+
+## Visualize Normalized Results
+```{r}
+# Get gene expression values for all samples
+df_vst_long <- as.data.frame(df_vst)
+df_vst_long <- rownames_to_column(df_vst_long, var = "Gene")
+df_vst_long <- df_vst_long %>%
+  pivot_longer(-Gene, names_to = "Sample.Cell_State", values_to = "Expression")
+df_vst_long <- df_vst_long %>%
+  left_join(df_metadata, by = "Sample.Cell_State")
+
+# Violin plot across all samples (grouped by cell state)
+norm_plot <- ggplot(df_vst_long, aes(x = Cell_State, 
+                                      y = Expression, 
+                                      fill = Cell_State)) +
+  geom_violin(scale = "width", trim = FALSE) +
+  theme_minimal(base_size = 16) +
+  labs(title = "Normalized Expression by Cell State (All Samples)",
+       x = "Cell State", y = "VST Expression") +
+  scale_fill_discrete(name = "State") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("plot_norm.png", plot = norm_plot, width = 15, height = 10, dpi = 300)
+norm_plot
+```
+
+
+## Extract 1500 Most Variable Genes Across Samples
+* To conserve memory, only the 1500 most variable genes are used for WGCNA and MEGENA
+```{r}
+# Compute variance for each gene
+gene_variances <- apply(df_vst, 1, var)
+
+# Extract top 1500 genes (most variable)
+top_genes <- names(sort(gene_variances, decreasing = TRUE)[1:1500])
+
+# Subset extracted data
+df_vst_top <- df_vst[top_genes, ]
+```
+
+
+## Remove Unnecessary Data
+```{r}
+remove(dds_est)
+remove(df_pseudobulk)
+remove(pseudobulk_matrix)
+remove(seurat_object)
+remove(umap_plot)
+remove(cell_state_labels)
+remove(cluster_labels)
+remove(custom_colors)
+remove(custom_labels)
+remove(gene_variances)
+remove(keep_genes)
+remove(top_genes)
+remove(df_vst_long)
+remove(norm_plot)
+```
+
+
+--
+# PCA (PRINCIPAL COMPONENT ANALYSIS)
+
+## Import Libraries
+* ggplot2 (v3.5.1): Create and save plots
+* vegan (v2.6-10): Analysis of Variance Using Distance Matrices
+```{r}
+# suppressMessages(library(ggplot2))
+suppressMessages(library(vegan))
+```
+
+## Compute PCA and Create PCA Data Frame
+* Outliers may have to do with biological differences between mice or with experimental conditions, but these outliers are still kept
+```{r}
+# Compute PCA
+pca_res <- prcomp(t(df_vst), center = TRUE, scale. = TRUE)
+
+# Create a data frame with PCA results and sample metadata
+df_pca <- data.frame(PC1 = pca_res$x[,1], 
+                     PC2 = pca_res$x[,2], 
+                     State = df_metadata$Cell_State, 
+                     Genotype = df_metadata$Genotype, 
+                     Treatment = df_metadata$Treatment)
+```
+
+## Compute Variance Explained with All Factors Combined
+* First value is % of variance explained by PC1, second value is for PC2
+```{r}
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+var_explained <- round(var_explained[1:2] * 100, 2)
+var_explained
+```
+
+## Compute Variance Explained for Each Cell State
+* First value is % of variance explained by PC1, second value is for PC2
+```{r}
+var_per_cell_state <- list()
+for (cell in unique(df_metadata$Cell_State)){
+  subset_samples <- which(df_metadata$Cell_State == cell)
+  pca_res_subset <- prcomp(t(df_vst[, subset_samples]),
+                           center = TRUE, scale. = TRUE)
+  var_explained_cell <- pca_res_subset$sdev^2 / sum(pca_res_subset$sdev^2)
+  var_per_cell_state[[cell]] <- round(var_explained_cell[1:2] * 100, 2)
+}
+var_per_cell_state
+```
+
+## PCA Plot Colored by Cell State
+```{r}
+# Plot and save PCA as image
+pca_state <- ggplot(df_pca, aes(x = PC1, y = PC2, color = State)) +
+  geom_point(size = 5) +
+  theme_minimal(base_size = 16) +
+  ggtitle("PCA: Colored by Cell State") +
+  labs(x = paste0("PC1, ", var_explained[1], "%"), y = paste0("PC2, ", var_explained[2], "%"))
+ggsave("pca_state.png", plot = pca_state, width = 10, height = 8, dpi = 300)
+pca_state
+```
+
+## PCA Plot for Genotype & Treatment Effects
+```{r}
+# Plot and save PCA as image
+pca_geno_treat <- ggplot(df_pca, aes(x = PC1, y = PC2, 
+                                     color = Genotype, 
+                                     shape = Treatment)) +
+  geom_point(size = 5) +
+  theme_minimal(base_size = 16) +
+  ggtitle("PCA: Genotype & Treatment Effects") +
+  labs(x = paste0("PC1, ", var_explained[1], "%"), y = paste0("PC2, ", var_explained[2], "%"))
+ggsave("pca_geno_treat.png", plot = pca_geno_treat, width = 10, height = 8, dpi = 300)
+pca_geno_treat
+```
+
+## PCA Plot For Each Cell State Showing Genotype & Treatment Effects
+```{r}
+# Plot and save PCA as image
+pca_cells <- ggplot(df_pca, aes(x = PC1, y = PC2, color = Genotype, shape = Treatment)) +
+  geom_point(size = 5) +
+  theme_minimal(base_size = 16) +
+  facet_wrap(~State) +
+  ggtitle("PCA: Genotype & Treatment Effects in Each Cell State")
+ggsave("pca_cells.png", plot = pca_cells, width = 10, height = 8, dpi = 300)
+pca_cells
+```
+
+## Compute Which Factor Causes the Most Variance
+* PERMANOVA is a distance-based linear model
+* Higher R^2 values for a term corresponds to a large proportion of variance being explained by that term
+* Pr(>F) is the p-value, so if p < 0.05 for a term, the term has a significant effect on variance across the samples
+* Because of the few number of replicates per experiment group, statistical power is quite low
+```{r}
+# Run PERMANOVA (Permutational Multivariate Analysis of Variance Using Distance Matrices)
+perm_res <- adonis2(t(df_vst) ~ Cell_State + Treatment + Genotype, 
+                    method = "euclidean", 
+                    data = df_metadata,
+                    by = "terms")
+perm_res
+```
+
+## Remove Unnecessary Data
+```{r}
+remove(df_pca)
+remove(pca_cells)
+remove(pca_geno_treat)
+remove(pca_res)
+remove(pca_res_subset)
+remove(pca_state)
+remove(perm_res)
+remove(var_per_cell_state)
+remove(cell)
+remove(subset_samples)
+remove(var_explained_cell)
+remove(var_explained)
+```
+
+
+--
+# HIERARCHICAL CLUSTERING
+
+## Import libraries
+* pheatmap (v1.0.12): Create a heat map
+* stringr (v1.5.1): Simple, Consistent Wrappers for Common String
+```{r}
+suppressMessages(library(pheatmap))
+# suppressMessages(library(stringr))
+```
+
+## Create Heat Map of Gene Expression for Samples
+```{r}
+# Sort data such that WT and T appear first with replicates grouped together
+df_metadata_sorted <- df_metadata %>%
+  arrange(Genotype, Treatment, Cell_State)
+df_vst_top_sorted <- df_vst_top[, df_metadata_sorted$Sample.Cell_State]
+
+# Ensure sorted metadata sample names match column names of sorted df_top
+annot_cols <- df_metadata_sorted[, c("Cell_State", "Treatment", "Genotype")]
+colnames(annot_cols) <- c("Cell State", "Treatment", "Genotype")
+# all.equal(colnames(df_vst_top_sorted), df_metadata_sorted$Sample.Cell_State)
+rownames(annot_cols) <- colnames(df_vst_top_sorted)
+
+# Create custom column labels
+colnames_samples <- gsub("_", " ", colnames(df_vst_top_sorted))
+
+# Create custom color palette and scale
+breaks <- seq(-2, 2, length.out = 100)
+colors <- colorRampPalette(c("blue", "white", "red"))(length(breaks) - 1)
+
+# Create and save heatmap
+# png("plot_heatmap.png", width = 3600, height = 3600, res = 300)
+# pheatmap(df_vst_top_sorted,
+#          scale = "row",
+#          clustering_distance_rows = "euclidean",
+#          clustering_distance_cols = "euclidean",
+#          clustering_method = "ward.D2",
+#          annotation_col = annot_cols,
+#          main = "Heatmap of Top 1500 Most Variable Genes",
+#          labels_col = colnames_samples,
+#          fontsize = 7,
+#          show_rownames = FALSE,
+#          cluster_cols = FALSE,
+#          color = colors,
+#          breaks = breaks)
+# invisible(dev.off)
+
+pheatmap(df_vst_top_sorted,
+         scale = "row",
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "ward.D2",
+         annotation_col = annot_cols,
+         main = "Heatmap of Top 1500 Most Variable Genes",
+         labels_col = colnames_samples,
+         fontsize = 7,
+         show_rownames = FALSE,
+         cluster_cols = FALSE,
+         color = colors,
+         breaks = breaks)
+```
+
+## Remove Unnecessary Data
+```{r}
+remove(annot_cols)
+remove(breaks)
+remove(colors)
+remove(colnames_samples)
+remove(df_vst_top_sorted)
+remove(df_metadata_sorted)
+```
+
+
+--
+# WGCNA
+
+## Import Libraries
+* WGCNA (v1.73): Computation for running WGCNA and output acquisition
+```{r}
+suppressMessages(library(WGCNA))
+```
+
+## Compute Soft Threshold Power
+```{r}
+powers <- c(seq(1, 20, by = 1), seq(20, 100, by = 5))
+sft <- pickSoftThreshold(df_vst_top, 
+                         powerVector = powers, 
+                         verbose = 5,
+                         networkType = "signed")
+```
+
+## Visualization
+* Very high soft threshold required for R² > 0.8, suggesting minimal gene expression differences between samples
+* Because of extremely high soft threshold value that is required, WGCNA was removed from analysis (works with lower powers)
+```{r}
+# Plot and save WGCNA plots
+# png("plots_wgcna.png", width = 3200, height = 2400, res = 300)
+# par(mfrow = c(1, 2))
+# plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3]) * sft$fitIndices[,2],
+#      type = "b", col = "blue",
+#      xlab = "Soft Threshold (Power)",
+#      ylab = "Scale-Free Topology Model Fit (Signed R²)",
+#      ylim = c(0, 1),
+#      main = "Scale Independence")
+# abline(h = 0.80, col = "red", lty = 2)  # R² > 0.90 or R² > 0.80
+# plot(sft$fitIndices[,1], sft$fitIndices[,5],
+#      type = "b", col = "blue",
+#      xlab = "Soft Threshold (Power)", ylab = "Mean Connectivity",
+#      main = "Mean Connectivity")
+# invisible(dev.off)
+
+# Set up plots side-by-side
+par(mfrow = c(1, 2))
+
+# Scale-free topology plot
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3]) * sft$fitIndices[,2],
+     type = "b", col = "blue",
+     xlab = "Soft Threshold (Power)",
+     ylab = "Scale-Free Topology Model Fit (Signed R²)",
+     ylim = c(0, 1),
+     main = "Scale Independence")
+abline(h = 0.80, col = "red", lty = 2)  # R² > 0.90 or R² > 0.80
+
+# Mean connectivity plot
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     type = "b", col = "blue",
+     xlab = "Soft Threshold (Power)", ylab = "Mean Connectivity",
+     main = "Mean Connectivity")
+```
+
+## Remove Unnecessary Data
+```{r}
+remove(powers)
+remove(sft)
+```
+
+
+--
+# MEGENA
+
+## Import Libraries
+* MEGENA (v1.3.7): Run MEGENA and obtain output
+* igraph (v2.1.2): Analyze networks and visualize them
+* DESeq2 (v1.46.0): Get differentially expressed genes
+```{r}
+# if (!requireNamespace("MEGENA", quietly = TRUE)) {
+#   install.packages("MEGENA", repos = "http://cran.us.r-project.org")
+# }
+suppressMessages(library(MEGENA))
+suppressMessages(library(igraph))
+# suppressMessages(library(DESeq2))
+```
+
+## Calculate Gene-Gene Correlation and Planar Filtered Network for Edge Pairs
+```{r}
+# Set number of cores
+n.cores <- min(12, detectCores() - 2)
+options(java.parameters = "-Xmx12G")
+
+# Calculate correlation and PFN
+cor_matrix <- calculate.correlation(df_vst_top, method = "pearson")
+pfn <- calculate.PFN(cor_matrix)
+head(pfn)
+```
+
+## Get Modules
+```{r}
+# Create graph from PFN
+g <- graph_from_data_frame(pfn, directed = FALSE)
+
+# Set seed for reproducibility
+set.seed(12345)
+
+# Get MEGENA output and module output
+invisible(capture.output(MEGENA_output <- do.MEGENA(g)))
+summary <- MEGENA.ModuleSummary(MEGENA_output)
+module_output <- module_convert_to_table(MEGENA_output,
+                                         mod.pval = 0.05,
+                                         hub.pval = 0.05,
+                                         min.size = 10,
+                                         max.size=vcount(g)/2)
+
+# Retrieve list of modules with corresponding genes
+modules <- module_output[, c("module", "id")]
+module_list <- split(modules$id, modules$module)
+
+# Get number of modules total
+length(module_list)
+
+# Identify largest modules and hub genes
+head(sort(sapply(module_list, length), decreasing = TRUE), 10)
+```
+
+## Visualize Modules
+```{r}
+# Create separate module table and rename module id column
+mod_table <- summary$module.table
+colnames(mod_table)[colnames(mod_table) == "module.id"] <- "id"
+
+# # Plot and save network
+# png("plot_net.png", width = 3200, height = 3200, res = 300)
+# plot_module_hierarchy(
+#   module.table = mod_table,
+#   plot.coord = NULL,
+#   edge.color = "grey",
+#   node.color = "black",
+#   node.label.color = "black",
+#   label.scaleFactor = 0.6,
+#   node.scaleFactor = 0.3,
+#   arrow.size = 0.01
+# )
+# invisible(dev.off)
+
+plot_module_hierarchy(
+  module.table = mod_table,
+  plot.coord = NULL,
+  edge.color = "grey",
+  node.color = "black",
+  node.label.color = "black",
+  label.scaleFactor = 0.6,
+  node.scaleFactor = 0.3,
+  arrow.size = 0.01
+)
+```
+
+## Remove Unnecessary Data
+```{r}
+remove(cor_matrix)
+remove(g)
+remove(mod_table)
+remove(module_output)
+remove(modules)
+remove(summary)
+remove(n.cores)
+# remove(MEGENA_output)
+# remove(pfn)
+```
+
+
+--
+# GO & KEGG ENRICHMENT
+
+## Import Libraries
+* GeneOverlap (v1.42.0): Identify DEGs that overlap with genes in MEGENA modules
+* clusterProfiler (v4.14.6): Universal enrichment tool
+* org.Mm.eg.db (v3.20.0): Genome wide annotation for mouse
+* ggplot2 (v3.5.1): Create and save plots
+* AnnotationDbi (v1.68.0): Convert between symbols and ENTREZ ids for genes
+* dplyr (v1.1.4): Create, modify, and/or delete columns or rows of data frame
+* stringr (v1.5.1): Wrapping strings
+* viridis (v0.6.5): Using colorblind-friendly palettes for plots
+```{r}
+suppressMessages(library(GeneOverlap))
+suppressMessages(library(clusterProfiler))
+suppressMessages(library(org.Mm.eg.db))
+# suppressMessages(library(AnnotationDbi))
+# suppressMessages(library(dplyr))
+# suppressMessages(library(stringr))
+# suppressMessages(library(ggplot2))
+# suppressMessages(library(viridis))
+```
+
+## Find Differentially Expressed Genes (DEGs) for Each Condition
+```{r}
+# Create new factor in dds
+dds$Condition <- factor(paste0(dds$Treatment, "_", dds$Genotype))
+dds$Condition <- relevel(dds$Condition, ref = "NT_WT")
+# levels(dds$Condition)
+
+# Create new design for DEGs
+dds_DESeq2 <- dds
+design(dds_DESeq2) <- ~ Cell_State + Condition
+
+# Run DESeq on dds
+dds_DESeq2 <- DESeq(dds_DESeq2)
+# resultsNames(dds_DESeq2)
+
+# Create contrasts for Suv39h1 inhibition alone, anti-PD-1 therapy alone, and combo
+res_suv <- results(dds_DESeq2, contrast = c("Condition", "NT_KO", "NT_WT"))
+res_pd1 <- results(dds_DESeq2, contrast = c("Condition", "T_WT", "NT_WT"))
+res_combo <- results(dds_DESeq2, contrast = c("Condition", "T_KO", "NT_WT"))
+
+# Retrieve list of significant DEGs (upregulated and downregulated)
+get_sig_genes <- function(res) {
+  res <- res[!is.na(res$padj) & res$padj < 0.1 & abs(res$log2FoldChange) > 1, ]
+  up <- rownames(res[res$log2FoldChange > 1, ])
+  down <- rownames(res[res$log2FoldChange < -1, ])
+  list(up = up, down = down)
+}
+
+degs_suv <- get_sig_genes(res_suv)
+degs_pd1 <- get_sig_genes(res_pd1)
+degs_combo <- get_sig_genes(res_combo)
+degs_list <- list(suv39h1_up = degs_suv$up,
+                  suv39h1_down = degs_suv$down,
+                  anti_PD1_up = degs_pd1$up,
+                  anti_PD1_down = degs_pd1$down,
+                  combo_up = degs_combo$up,
+                  combo_down = degs_combo$down)
+
+# Remove unnecessary data
+remove(degs_suv,
+       degs_pd1,
+       degs_combo)
+remove(res_suv)
+remove(res_pd1)
+remove(res_combo)
+remove(dds_DESeq2)
+```
+
+## Identify Enriched MEGENA Modules
+```{r}
+# Create GeneOverlap object
+module_list <- lapply(module_list, as.character)
+gom <- newGOM(degs_list, module_list, genome.size = nrow(df_vst_top))
+
+get_sig_modules <- function(gom, condition) {
+  pvals <- getMatrix(gom, "pval")[condition, ]
+  sig_modules <- names(pvals)[pvals < 0.1]
+  sig_modules
+}
+
+# Extract significant modules
+modules_suv_up <- get_sig_modules(gom, "suv39h1_up")
+modules_suv_down <- get_sig_modules(gom, "suv39h1_down")
+modules_pd1_up <- get_sig_modules(gom, "anti_PD1_up")
+modules_pd1_down <- get_sig_modules(gom, "anti_PD1_down")
+modules_combo_up <- get_sig_modules(gom, "combo_up")
+modules_combo_down <- get_sig_modules(gom, "combo_down")
+modules_cond <- list(suv39h1_up = modules_suv_up,
+                  suv39h1_down = modules_suv_down,
+                  anti_PD1_up = modules_pd1_up,
+                  anti_PD1_down = modules_pd1_down,
+                  combo_up = modules_combo_up,
+                  combo_down = modules_combo_down)
+
+# Remove unnecessary data
+remove(modules_suv_up, 
+       modules_suv_down, 
+       modules_pd1_up,
+       modules_pd1_down, 
+       modules_combo_up, 
+       modules_combo_down)
+# remove(gom)
+```
+
+## Run GO & KEGG Enrichment
+```{r}
+# Convert gene symbols to ENTREZ IDs
+convert_symbols_to_entrez <- function(gene_symbols) {
+  conversion <- AnnotationDbi::select(org.Mm.eg.db,
+                                      keys = gene_symbols,
+                                      columns = "ENTREZID",
+                                      keytype = "SYMBOL")
+  conversion <- na.omit(conversion)
+  unique(conversion$ENTREZID)
+}
+
+# GO enrichment (Biological Process)
+enrich_go <- function(gene_symbols) {
+  genes_entrez <- convert_symbols_to_entrez(gene_symbols)
+  enrichGO(
+    gene = genes_entrez,
+    OrgDb = org.Mm.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.1,
+    qvalueCutoff = 0.2
+  )
+}
+
+# KEGG enrichment
+enrich_kegg <- function(gene_symbols) {
+  genes_entrez <- convert_symbols_to_entrez(gene_symbols)
+  enrichKEGG(
+    gene = genes_entrez,
+    organism = "mmu",
+    keyType = "kegg",
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.1,
+    qvalueCutoff = 0.2
+  )
+}
+
+# Run Go and KEGG enrichment on each module
+enrich_modules <- function(modules, module_list) {
+  results_list <- list()
+  for (module_name in modules) {
+    cat("Processing:", module_name, "\n")
+    genes <- module_list[[module_name]]
+
+    ego <- tryCatch({
+      ego_result <- suppressMessages(enrich_go(genes))
+      
+      # Remove redundant and highly similar terms
+      if (!is.null(ego_result) && inherits(ego_result, "enrichResult")) {
+        ego_result <- simplify(
+          ego_result,
+          cutoff = 0.7,
+          by = "p.adjust",
+          select_fun = min,
+          measure = "Wang"
+        )
+      }
+      ego_result
+    }, error = function(e) NULL)
+    kegg <- tryCatch(suppressMessages(enrich_kegg(genes)), error = function(e) NULL)
+
+    results_list[[module_name]] <- list(GO = ego, KEGG = kegg)
+  }
+  return(results_list)
+}
+
+# Run for each set
+results_suv_up <- enrich_modules(modules_cond$suv39h1_up, module_list)
+results_suv_down <- enrich_modules(modules_cond$suv39h1_down, module_list)
+results_pd1_up <- enrich_modules(modules_cond$anti_PD1_up, module_list)
+results_pd1_down <- enrich_modules(modules_cond$anti_PD1_down, module_list)
+results_combo_up <- enrich_modules(modules_cond$combo_up, module_list)
+results_combo_down <- enrich_modules(modules_cond$combo_down, module_list)
+```
+## Filter GO & KEGG Terms in Each Module by Description
+* Focus on immune-related terms for both enrichment methods
+```{r}
+# Convert gene ENTREZ IDs to symbols
+convert_entrez_to_symbols <- function(entrez_ids) {
+  entrez_ids <- as.character(entrez_ids)
+  entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+  conversion <- suppressMessages(AnnotationDbi::select(org.Mm.eg.db, 
+                                      keys = entrez_ids,
+                                      columns = "SYMBOL", 
+                                      keytype = "ENTREZID"))
+  conversion <- na.omit(conversion)
+  setNames(conversion$SYMBOL, conversion$ENTREZID)
+}
+
+# Set immune-related terms
+go_immune_terms <- paste(c("T cell", "B cell", "memory", "macrophage", "dendritic cell",
+                           "natural killer", "monocyte", "granulocyte",
+                           "megakaryocyte", "erythrocyte", "lymphocyte",
+                           "cytokine", "interferon", "inflammatory", "interleukin",
+                           "immune", "MHC", "T-helper"), collapse = "|")
+kegg_immune_terms <- paste(c("T cell", "B cell", "cytokine", "chemokine", "interferon",
+                             "interleukin", "immune", "NK cell", "dendritic", "antigen",
+                             "MHC"), collapse = "|")
+
+# Filter for immune-related terms
+filter_terms_by_deg_list <- function(enrich_result, deg_genes, 
+                                     min_deg_hits = 1, padj_cutoff = 0.1,
+                                     term_filter = NULL) {
+  df <- as.data.frame(enrich_result@result)
+  df <- df[df$p.adjust <= padj_cutoff, ]
+  if (!is.null(term_filter)) {
+    df <- df[grepl(term_filter, df$Description, ignore.case = FALSE), ]
+  }
+  if (nrow(df) == 0) return(df)
+
+  entrez_to_symbol <- convert_entrez_to_symbols(unique(unlist(strsplit(df$geneID, "/"))))
+
+  keep_rows <- sapply(df$geneID, function(gene_str) {
+    entrez_ids <- unlist(strsplit(gene_str, "/"))
+    gene_syms <- entrez_to_symbol[entrez_ids]
+    gene_syms <- gene_syms[!is.na(gene_syms)]
+    deg_hits <- sum(gene_syms %in% deg_genes)
+    return(deg_hits >= min_deg_hits)
+  })
+  df[keep_rows, ]
+}
+
+filter_results_strict <- function(results_list, deg_genes, 
+                                  min_deg_hits = 1, padj_cutoff = 0.1) {
+  lapply(results_list, function(r) {
+    list(
+      GO = if (!is.null(r$GO)) filter_terms_by_deg_list(r$GO, deg_genes, min_deg_hits, padj_cutoff, go_immune_terms) else NULL,
+      KEGG = if (!is.null(r$KEGG)) filter_terms_by_deg_list(r$KEGG, deg_genes, min_deg_hits, padj_cutoff, kegg_immune_terms) else NULL
+    )
+  })
+}
+
+filtered_suv_up <- filter_results_strict(results_suv_up, degs_list$suv39h1_up)
+filtered_suv_down <- filter_results_strict(results_suv_down, degs_list$suv39h1_down)
+filtered_pd1_up <- filter_results_strict(results_pd1_up, degs_list$anti_PD1_up)
+filtered_pd1_down <- filter_results_strict(results_pd1_down, degs_list$anti_PD1_down)
+filtered_combo_up <- filter_results_strict(results_combo_up, degs_list$combo_up)
+filtered_combo_down <- filter_results_strict(results_combo_down, degs_list$combo_down)
+```
+
+## Get Top 3 Modules For Given Condition (GO Enrichment)
+* Little to no relevant or significant KEGG terms, so KEGG terms were omitted
+```{r}
+# Implement a scoring system that will get top 3 genes
+score_modules <- function(filtered_results, source = "GO") {
+  sapply(filtered_results, function(r) {
+    if (!is.null(r[[source]])) {
+      df <- r[[source]]
+      # Calculate number of significant terms
+      num_terms <- nrow(df)
+      
+      # Calculate the average -log10(p.adjust) score
+      avg_significance <- mean(-log10(df$p.adjust), na.rm = TRUE)
+      
+      # Scale by average of p.adjust values
+      module_score <- num_terms * avg_significance
+      module_score
+    } else {
+      return(0)
+    }
+  })
+}
+
+top_go_mod_suv_up <- names(sort(score_modules(filtered_suv_up, "GO"),
+                                  decreasing = TRUE))[1:3]
+top_go_mod_suv_down <- names(sort(score_modules(filtered_suv_down, "GO"),
+                                  decreasing = TRUE))[1:3]
+top_go_mod_apd1_up <- names(sort(score_modules(filtered_pd1_up, "GO"),
+                                  decreasing = TRUE))[1:3]
+top_go_mod_apd1_down <- names(sort(score_modules(filtered_pd1_down, "GO"),
+                                  decreasing = TRUE))[1:3]
+top_go_mod_combo_up <- names(sort(score_modules(filtered_combo_up, "GO"),
+                                  decreasing = TRUE))[1:3]
+top_go_mod_combo_down <- names(sort(score_modules(filtered_combo_down, "GO"),
+                                  decreasing = TRUE))[1:3]
+```
+
+## Get Top 10 GO Terms Per Module For Given Condition
+```{r}
+get_top_terms <- function(filtered_results, module_names,
+                          source = "GO", top_n = 10) {
+  term_df <- lapply(module_names, function(mod) {
+    if (!is.null(filtered_results[[mod]][[source]])) {
+      filtered_results[[mod]][[source]] %>%
+        dplyr::arrange(p.adjust) %>%
+        dplyr::slice_head(n = top_n) %>%
+        dplyr::mutate(module = mod, source = source)
+    } else {
+      NULL
+    }
+  })
+  dplyr::bind_rows(term_df)
+}
+
+top_go_suv_up <- get_top_terms(filtered_suv_up, top_go_mod_suv_up, "GO")
+top_go_suv_down <- get_top_terms(filtered_suv_down, top_go_mod_suv_down, "GO")
+top_go_apd1_up <- get_top_terms(filtered_pd1_up, top_go_mod_apd1_up, "GO")
+top_go_apd1_down <- get_top_terms(filtered_pd1_down, top_go_mod_apd1_down, "GO")
+top_go_combo_up <- get_top_terms(filtered_combo_up, top_go_mod_combo_up, "GO")
+top_go_combo_down <- get_top_terms(filtered_combo_down, top_go_mod_combo_down, "GO")
+```
+
+## Get Module Genes Overlapping with Condition DEGs
+```{r}
+get_shared_genes <- function(filtered_results, deg_genes,
+                                                  module_list, source = "GO",
+                                                  top_n = 3) {
+  source <- match.arg(source)
+
+  # Score modules and select top n modules
+  top_modules <- names(sort(score_modules(filtered_results, "GO"),
+                                  decreasing = TRUE))[1:top_n]
+  
+  results <- list()
+
+  # Convert ENTREZ to symbol conversion
+  all_entrez <- unique(unlist(lapply(filtered_results[top_modules], function(r) {
+    if (!is.null(r[[source]])) unique(unlist(strsplit(r[[source]]$geneID, "/"))) else NULL
+  })))
+  entrez_to_symbol <- convert_entrez_to_symbols(all_entrez)
+
+  # Iterate through each top module
+  for (mod in top_modules) {
+    term_df <- filtered_results[[mod]][[source]]
+    if (is.null(term_df)) next
+
+    for (i in seq_len(nrow(term_df))) {
+      row <- term_df[i, ]
+      term_id <- row$ID
+      term_desc <- row$Description
+      entrez_ids <- unlist(strsplit(row$geneID, "/"))
+      matching_degs <- entrez_ids[entrez_ids %in% names(entrez_to_symbol) &
+                                   entrez_to_symbol[entrez_ids] %in% deg_genes]
+      if (length(matching_degs) > 0) {
+        df <- data.frame(
+          Module = mod,
+          Term_ID = term_id,
+          Description = term_desc,
+          ENTREZID = matching_degs,
+          SYMBOL = entrez_to_symbol[matching_degs],
+          stringsAsFactors = FALSE
+        )
+        results[[length(results) + 1]] <- df
+      }
+    }
+  }
+
+  if (length(results) == 0) return(data.frame())
+  do.call(rbind, results)
+}
+
+mod_genes_suv_up <- get_shared_genes(
+  filtered_results = filtered_suv_up,
+  deg_genes = degs_list$suv39h1_up,
+  module_list = module_list,
+  source = "GO",
+  top_n = 3)
+mod_genes_suv_down <- get_shared_genes(
+  filtered_results = filtered_suv_down,
+  deg_genes = degs_list$suv39h1_down,
+  module_list = module_list,
+  source = "GO",
+  top_n = 3)
+mod_genes_apd1_up <- get_shared_genes(
+  filtered_results = filtered_pd1_up,
+  deg_genes = degs_list$anti_PD1_up,
+  module_list = module_list,
+  source = "GO",
+  top_n = 3)
+mod_genes_apd1_down <- get_shared_genes(
+  filtered_results = filtered_pd1_down,
+  deg_genes = degs_list$anti_PD1_down,
+  module_list = module_list,
+  source = "GO",
+  top_n = 3)
+mod_genes_combo_up <- get_shared_genes(
+  filtered_results = filtered_combo_up,
+  deg_genes = degs_list$combo_up,
+  module_list = module_list,
+  source = "GO",
+  top_n = 3)
+mod_genes_combo_down <- get_shared_genes(
+  filtered_results = filtered_combo_down,
+  deg_genes = degs_list$combo_down,
+  module_list = module_list,
+  source = "GO",
+  top_n = 3)
+```
+
+## Get Top Module Genes Overlapping with Condition DEGs
+```{r}
+filter_mod_genes_by_top_terms <- function(mod_genes_df, top_terms_df) {
+  dplyr::semi_join(
+    mod_genes_df,
+    top_terms_df,
+    by = c("Module" = "module", "Term_ID" = "ID")
+  )
+}
+
+f_mod_genes_suv_up <- filter_mod_genes_by_top_terms(mod_genes_suv_up,
+                                                    top_go_suv_up)
+f_mod_genes_suv_down <- filter_mod_genes_by_top_terms(mod_genes_suv_down,
+                                                      top_go_suv_down)
+f_mod_genes_pd1_up <- filter_mod_genes_by_top_terms(mod_genes_apd1_up,
+                                                    top_go_apd1_up)
+f_mod_genes_pd1_down <- filter_mod_genes_by_top_terms(mod_genes_apd1_down,
+                                                      top_go_apd1_down)
+f_mod_genes_combo_up <- filter_mod_genes_by_top_terms(mod_genes_combo_up,
+                                                      top_go_combo_up)
+f_mod_genes_combo_down <- filter_mod_genes_by_top_terms(mod_genes_combo_down,
+                                                        top_go_combo_down)
+```
+
+## Get Written Summary of Top Terms
+* Format follows as "{module}: {description} from {upregulation/downregulation} of gene {gene symbol}"
+```{r}
+written_summary <- function(filtered_term_genes, direction = c("up", "down")) {
+  if (direction == "up") {
+    res <- paste0(filtered_term_genes$Module, ": ", filtered_term_genes$Description,
+           "from upregulation of gene ", filtered_term_genes$SYMBOL)
+  }
+  
+  if (direction == "down") {
+    res <- paste0(filtered_term_genes$Module, ": ", filtered_term_genes$Description,
+           "from downregulation of gene ", filtered_term_genes$SYMBOL)
+  }
+  return(res)
+}
+
+summary_suv_up <- written_summary(f_mod_genes_suv_up, direction = "up")
+summary_suv_down <- written_summary(f_mod_genes_suv_down, direction = "down")
+summary_pd1_up <- written_summary(f_mod_genes_pd1_up, direction = "up")
+summary_pd1_down <- written_summary(f_mod_genes_pd1_down, direction = "down")
+summary_combo_up <- written_summary(f_mod_genes_combo_up, direction = "up")
+summary_combo_down <- written_summary(f_mod_genes_combo_down, direction = "down")
+```
+
+## Plot and Save Top 10 Filtered GO Terms by Module
+* Save all module plots in a single PDF, but create PNGs for top modules for each condition
+```{r}
+plot_filtered_enrichments <- function(filtered_results, 
+                                      term_type = c("GO", "KEGG"), 
+                                      output_pdf, 
+                                      top_n = 10,
+                                      top_modules = NULL) {
+  term_type <- match.arg(term_type)
+  
+  if (!requireNamespace("viridis", quietly = TRUE)) {
+    stop("Please install the 'viridis' package to use this color scale.")
+  }
+  pdf_base <- tools::file_path_sans_ext(basename(output_pdf))
+  
+  pdf(output_pdf, width = 28, height = 8)
+  
+  for (module in names(filtered_results)) {
+    df <- filtered_results[[module]][[term_type]]
+    
+    if (!is.null(df) && nrow(df) > 0) {
+      df_top <- df[order(df$p.adjust), ][1:min(top_n, nrow(df)), ]
+      df_top$WrappedDescription <- stringr::str_wrap(df_top$Description, width = 50)
+      df_top$WrappedDescription <- factor(df_top$WrappedDescription,
+                                          levels = rev(df_top$WrappedDescription))
+    
+      df_top$padj_label <- formatC(df_top$p.adjust, format = "e", digits = 2)
+      
+      p <- ggplot(df_top, aes(x = WrappedDescription, y = Count, fill = p.adjust)) +
+        geom_col() +
+        geom_text(aes(label = padj_label), 
+                  hjust = -0.1, 
+                  size = 7) +
+        coord_flip() +
+        viridis::scale_fill_viridis(
+          direction = -1,
+          option = "D",
+          name = "Adjusted p-value"
+        ) +
+        theme_minimal(base_size = 22) +
+        labs(
+          title = paste("Top", term_type, "Terms for Module", module),
+          x = NULL,
+          y = "Gene Count"
+        ) +
+        theme(
+          legend.position = "right",
+          legend.box.margin = margin(0, 10, 0, 0)
+        ) +
+        scale_y_continuous(
+          expand = expansion(mult = c(0, 0.1)),
+          breaks = seq(0, max(df_top$Count), by = 1)
+        )
+      
+      print(p)
+      
+      if (!is.null(top_modules) && module %in% top_modules) {
+        png_filename <- paste0(pdf_base, "_", module, ".png")
+        ggsave(filename = png_filename, plot = p, width = 28, height = 8, dpi = 300)
+      }
+    }
+  }
+  
+  invisible(dev.off())
+}
+
+plot_filtered_enrichments(filtered_suv_up, term_type = "GO",
+                          output_pdf = "Suv_Up_GO_Terms.pdf", top_n = 10,
+                          top_modules = top_go_mod_suv_up)
+plot_filtered_enrichments(filtered_suv_down, term_type = "GO",
+                          output_pdf = "Suv_Down_GO_Terms.pdf", top_n = 10,
+                          top_modules = top_go_mod_suv_down)
+plot_filtered_enrichments(filtered_pd1_up, term_type = "GO",
+                          output_pdf = "aPD1_Up_GO_Terms.pdf", top_n = 10,
+                          top_modules = top_go_mod_apd1_up)
+plot_filtered_enrichments(filtered_pd1_down, term_type = "GO",
+                          output_pdf = "aPD1_Down_GO_Terms.pdf", top_n = 10,
+                          top_modules = top_go_mod_apd1_down)
+plot_filtered_enrichments(filtered_combo_up, term_type = "GO",
+                          output_pdf = "Combo_Up_GO_Terms.pdf", top_n = 10,
+                          top_modules = top_go_mod_combo_up)
+plot_filtered_enrichments(filtered_combo_down, term_type = "GO",
+                          output_pdf = "Combo_Down_GO_Terms.pdf", top_n = 10,
+                          top_modules = top_go_mod_combo_down)
+```
